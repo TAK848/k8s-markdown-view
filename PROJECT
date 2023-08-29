@@ -7,4 +7,14 @@ layout:
 - go.kubebuilder.io/v4
 projectName: mdview-controller
 repo: github.com/TAK848/k8s-markdown-view
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: kubebuilder-md.practice.tak848.net
+  group: view
+  kind: MarkdownView
+  path: github.com/TAK848/k8s-markdown-view/api/v1
+  version: v1
 version: "3"
