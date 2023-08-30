@@ -19,4 +19,4 @@ spec:
 
       一ページ目のコンテンツです。
   replicas: 1
-  viewerImage: "peaceiris/mdbook:latest"
+  # viewerImage: "peaceiris/mdbook:latest"
