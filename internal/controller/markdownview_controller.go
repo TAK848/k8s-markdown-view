@@ -19,26 +19,24 @@ package controller
 //! [import]
 import (
 	"context"
-	"fmt"
 
 	viewv1 "github.com/TAK848/k8s-markdown-view/api/v1"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	applyappsv1 "k8s.io/client-go/applyconfigurations/apps/v1"
-	applycorev1 "k8s.io/client-go/applyconfigurations/core/v1"
-	applymetav1 "k8s.io/client-go/applyconfigurations/meta/v1"
+	appsv1apply "k8s.io/client-go/applyconfigurations/apps/v1"
+	corev1apply "k8s.io/client-go/applyconfigurations/core/v1"
+	metav1apply "k8s.io/client-go/applyconfigurations/meta/v1"
 	"k8s.io/utils/pointer"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 //! [import]
@@ -54,13 +52,13 @@ type MarkdownViewReconciler struct {
 //! [reconciler]
 
 //! [rbac]
-// +kubebuilder:rbac:groups=view.zoetrope.github.io,resources=markdownviews,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=view.zoetrope.github.io,resources=markdownviews/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=view.zoetrope.github.io,resources=markdownviews/finalizers,verbs=update
-// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete;deletecollection
-// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=events,verbs=create;update;patch
+//+kubebuilder:rbac:groups=view.zoetrope.github.io,resources=markdownviews,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=view.zoetrope.github.io,resources=markdownviews/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=view.zoetrope.github.io,resources=markdownviews/finalizers,verbs=update
+//+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=core,resources=events,verbs=create;update;patch
 //! [rbac]
 
 //! [reconcile]
@@ -73,333 +71,139 @@ type MarkdownViewReconciler struct {
 // the user.
 //
 // For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.12.1/pkg/reconcile
+// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.12.3/pkg/reconcile
 func (r *MarkdownViewReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	res, err := r.Reconcile_create(ctx, req)
-	if err != nil && !apierrors.IsAlreadyExists(err) {
-		return res, err
-	}
+	logger := log.FromContext(ctx)
 
-	res, err = r.Reconcile_createOrUpdate(ctx, req)
-	if err != nil {
-		return res, err
-	}
-
-RETRY:
-	res, err = r.Reconcile_get(ctx, req)
-	if apierrors.IsNotFound(err) {
-		goto RETRY
+	var mdView viewv1.MarkdownView
+	err := r.Get(ctx, req.NamespacedName, &mdView)
+	if errors.IsNotFound(err) {
+		return ctrl.Result{}, nil
 	}
 	if err != nil {
-		return res, err
+		logger.Error(err, "unable to get MarkdownView", "name", req.NamespacedName)
+		return ctrl.Result{}, err
 	}
 
-	res, err = r.Reconcile_list(ctx, req)
+	if !mdView.ObjectMeta.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, nil
+	}
+
+	err = r.reconcileConfigMap(ctx, mdView)
 	if err != nil {
-		return res, err
+		return ctrl.Result{}, err
 	}
-
-	res, err = r.Reconcile_pagination(ctx, req)
+	err = r.reconcileDeployment(ctx, mdView)
 	if err != nil {
-		return res, err
+		return ctrl.Result{}, err
 	}
-
-	res, err = r.Reconcile_patchMerge(ctx, req)
+	err = r.reconcileService(ctx, mdView)
 	if err != nil {
-		return res, err
+		return ctrl.Result{}, err
 	}
 
-	res, err = r.Reconcile_patchApply(ctx, req)
-	if err != nil {
-		return res, err
-	}
-
-	res, err = r.Reconcile_patchApplyConfig(ctx, req)
-	if err != nil {
-		return res, err
-	}
-
-	res, err = r.Reconcile_deleteWithPreConditions(ctx, req)
-	if err != nil {
-		return res, err
-	}
-
-	res, err = r.Reconcile_deleteAllOfDeployment(ctx, req)
-	if err != nil {
-		return res, err
-	}
-
-	return res, err
+	return r.updateStatus(ctx, mdView)
 }
 
 //! [reconcile]
 
-//! [managedby]
+//! [reconcile-configmap]
 
-// SetupWithManager sets up the controller with the Manager.
-func (r *MarkdownViewReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&viewv1.MarkdownView{}).
-		Complete(r)
-}
+func (r *MarkdownViewReconciler) reconcileConfigMap(ctx context.Context, mdView viewv1.MarkdownView) error {
+	logger := log.FromContext(ctx)
 
-//! [managedby]
+	cm := &corev1.ConfigMap{}
+	cm.SetNamespace(mdView.Namespace)
+	cm.SetName("markdowns-" + mdView.Name)
 
-//! [create]
-
-func (r *MarkdownViewReconciler) Reconcile_create(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	dep := appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "sample",
-			Namespace: "default",
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: pointer.Int32Ptr(1),
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{"app": "nginx"},
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{"app": "nginx"},
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "nginx",
-							Image: "nginx:latest",
-						},
-					},
-				},
-			},
-		},
-	}
-	err := r.Create(ctx, &dep)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{}, nil
-}
-
-//! [create]
-
-//! [create-or-update]
-
-func (r *MarkdownViewReconciler) Reconcile_createOrUpdate(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	svc := &corev1.Service{}
-	svc.SetNamespace("default")
-	svc.SetName("sample")
-
-	op, err := ctrl.CreateOrUpdate(ctx, r.Client, svc, func() error {
-		svc.Spec.Type = corev1.ServiceTypeClusterIP
-		svc.Spec.Selector = map[string]string{"app": "nginx"}
-		svc.Spec.Ports = []corev1.ServicePort{
-			{
-				Name:       "http",
-				Protocol:   corev1.ProtocolTCP,
-				Port:       80,
-				TargetPort: intstr.FromInt(80),
-			},
+	op, err := ctrl.CreateOrUpdate(ctx, r.Client, cm, func() error {
+		if cm.Data == nil {
+			cm.Data = make(map[string]string)
+		}
+		for name, content := range mdView.Spec.Markdowns {
+			cm.Data[name] = content
 		}
 		return nil
 	})
+
 	if err != nil {
-		return ctrl.Result{}, err
+		logger.Error(err, "unable to create or update ConfigMap")
+		return err
 	}
 	if op != controllerutil.OperationResultNone {
-		fmt.Printf("Deployment %s\n", op)
+		logger.Info("reconcile ConfigMap successfully", "op", op)
 	}
-	return ctrl.Result{}, nil
+	return nil
 }
 
-//! [create-or-update]
+//! [reconcile-configmap]
 
-//! [get]
+//! [reconcile-deployment]
 
-func (r *MarkdownViewReconciler) Reconcile_get(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var deployment appsv1.Deployment
-	err := r.Get(ctx, client.ObjectKey{Namespace: "default", Name: "sample"}, &deployment)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	fmt.Printf("Got Deployment: %#v\n", deployment)
-	return ctrl.Result{}, nil
-}
+func (r *MarkdownViewReconciler) reconcileDeployment(ctx context.Context, mdView viewv1.MarkdownView) error {
+	logger := log.FromContext(ctx)
 
-//! [get]
-
-//! [list]
-
-func (r *MarkdownViewReconciler) Reconcile_list(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var services corev1.ServiceList
-	err := r.List(ctx, &services, &client.ListOptions{
-		Namespace:     "default",
-		LabelSelector: labels.SelectorFromSet(map[string]string{"app": "sample"}),
-	})
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	for _, svc := range services.Items {
-		fmt.Println(svc.Name)
-	}
-	return ctrl.Result{}, nil
-}
-
-//! [list]
-
-//! [pagination]
-
-func (r *MarkdownViewReconciler) Reconcile_pagination(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	token := ""
-	for i := 0; ; i++ {
-		var services corev1.ServiceList
-		err := r.List(ctx, &services, &client.ListOptions{
-			Limit:    3,
-			Continue: token,
-		})
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-
-		fmt.Printf("Page %d:\n", i)
-		for _, svc := range services.Items {
-			fmt.Println(svc.Name)
-		}
-		fmt.Println()
-
-		token = services.ListMeta.Continue
-		if len(token) == 0 {
-			return ctrl.Result{}, nil
-		}
-	}
-}
-
-//! [pagination]
-
-//! [cond]
-
-func (r *MarkdownViewReconciler) Reconcile_deleteWithPreConditions(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var deploy appsv1.Deployment
-	err := r.Get(ctx, client.ObjectKey{Namespace: "default", Name: "sample"}, &deploy)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	uid := deploy.GetUID()
-	resourceVersion := deploy.GetResourceVersion()
-	cond := metav1.Preconditions{
-		UID:             &uid,
-		ResourceVersion: &resourceVersion,
-	}
-	err = r.Delete(ctx, &deploy, &client.DeleteOptions{
-		Preconditions: &cond,
-	})
-	return ctrl.Result{}, err
-}
-
-//! [cond]
-
-//! [delete-all-of]
-
-func (r *MarkdownViewReconciler) Reconcile_deleteAllOfDeployment(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	err := r.DeleteAllOf(ctx, &appsv1.Deployment{}, client.InNamespace("default"))
-	return ctrl.Result{}, err
-}
-
-//! [delete-all-of]
-
-//! [update-status]
-
-func (r *MarkdownViewReconciler) updateStatus(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var dep appsv1.Deployment
-	err := r.Get(ctx, client.ObjectKey{Namespace: "default", Name: "sample"}, &dep)
-	if err != nil {
-		return ctrl.Result{}, err
+	depName := "viewer-" + mdView.Name
+	viewerImage := "peaceiris/mdbook:latest"
+	if len(mdView.Spec.ViewerImage) != 0 {
+		viewerImage = mdView.Spec.ViewerImage
 	}
 
-	dep.Status.AvailableReplicas = 3
-	err = r.Status().Update(ctx, &dep)
-	return ctrl.Result{}, err
-}
-
-//! [update-status]
-
-//! [patch-merge]
-
-func (r *MarkdownViewReconciler) Reconcile_patchMerge(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var dep appsv1.Deployment
-	err := r.Get(ctx, client.ObjectKey{Namespace: "default", Name: "sample"}, &dep)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	newDep := dep.DeepCopy()
-	newDep.Spec.Replicas = pointer.Int32Ptr(3)
-	patch := client.MergeFrom(&dep)
-
-	err = r.Patch(ctx, newDep, patch)
-
-	return ctrl.Result{}, err
-}
-
-//! [patch-merge]
-
-//! [patch-apply]
-
-func (r *MarkdownViewReconciler) Reconcile_patchApply(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	patch := &unstructured.Unstructured{}
-	patch.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "apps",
-		Version: "v1",
-		Kind:    "Deployment",
-	})
-	patch.SetNamespace("default")
-	patch.SetName("sample2")
-	patch.UnstructuredContent()["spec"] = map[string]interface{}{
-		"replicas": 2,
-		"selector": map[string]interface{}{
-			"matchLabels": map[string]string{
-				"app": "nginx",
-			},
-		},
-		"template": map[string]interface{}{
-			"metadata": map[string]interface{}{
-				"labels": map[string]string{
-					"app": "nginx",
-				},
-			},
-			"spec": map[string]interface{}{
-				"containers": []interface{}{
-					map[string]interface{}{
-						"name":  "nginx",
-						"image": "nginx:latest",
-					},
-				},
-			},
-		},
-	}
-
-	err := r.Patch(ctx, patch, client.Apply, &client.PatchOptions{
-		FieldManager: "client-sample",
-		Force:        pointer.Bool(true),
-	})
-
-	return ctrl.Result{}, err
-}
-
-//! [patch-apply]
-
-//! [patch-apply-config]
-
-func (r *MarkdownViewReconciler) Reconcile_patchApplyConfig(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	dep := applyappsv1.Deployment("sample3", "default").
-		WithSpec(applyappsv1.DeploymentSpec().
-			WithReplicas(3).
-			WithSelector(applymetav1.LabelSelector().WithMatchLabels(map[string]string{"app": "nginx"})).
-			WithTemplate(applycorev1.PodTemplateSpec().
-				WithLabels(map[string]string{"app": "nginx"}).
-				WithSpec(applycorev1.PodSpec().
-					WithContainers(applycorev1.Container().
-						WithName("nginx").
-						WithImage("nginx:latest"),
+	dep := appsv1apply.Deployment(depName, mdView.Namespace).
+		WithLabels(map[string]string{
+			"app.kubernetes.io/name":       "mdbook",
+			"app.kubernetes.io/instance":   mdView.Name,
+			"app.kubernetes.io/created-by": "markdown-view-controller",
+		}).
+		WithSpec(appsv1apply.DeploymentSpec().
+			WithReplicas(mdView.Spec.Replicas).
+			WithSelector(metav1apply.LabelSelector().WithMatchLabels(map[string]string{
+				"app.kubernetes.io/name":       "mdbook",
+				"app.kubernetes.io/instance":   mdView.Name,
+				"app.kubernetes.io/created-by": "markdown-view-controller",
+			})).
+			WithTemplate(corev1apply.PodTemplateSpec().
+				WithLabels(map[string]string{
+					"app.kubernetes.io/name":       "mdbook",
+					"app.kubernetes.io/instance":   mdView.Name,
+					"app.kubernetes.io/created-by": "markdown-view-controller",
+				}).
+				WithSpec(corev1apply.PodSpec().
+					WithContainers(corev1apply.Container().
+						WithName("mdbook").
+						WithImage(viewerImage).
+						WithImagePullPolicy(corev1.PullIfNotPresent).
+						WithCommand("mdbook").
+						WithArgs("serve", "--hostname", "0.0.0.0").
+						WithVolumeMounts(corev1apply.VolumeMount().
+							WithName("markdowns").
+							WithMountPath("/book/src"),
+						).
+						WithPorts(corev1apply.ContainerPort().
+							WithName("http").
+							WithProtocol(corev1.ProtocolTCP).
+							WithContainerPort(3000),
+						).
+						WithLivenessProbe(corev1apply.Probe().
+							WithHTTPGet(corev1apply.HTTPGetAction().
+								WithPort(intstr.FromString("http")).
+								WithPath("/").
+								WithScheme(corev1.URISchemeHTTP),
+							),
+						).
+						WithReadinessProbe(corev1apply.Probe().
+							WithHTTPGet(corev1apply.HTTPGetAction().
+								WithPort(intstr.FromString("http")).
+								WithPath("/").
+								WithScheme(corev1.URISchemeHTTP),
+							),
+						),
+					).
+					WithVolumes(corev1apply.Volume().
+						WithName("markdowns").
+						WithConfigMap(corev1apply.ConfigMapVolumeSource().
+							WithName("markdowns-" + mdView.Name),
+						),
 					),
 				),
 			),
@@ -407,32 +211,150 @@ func (r *MarkdownViewReconciler) Reconcile_patchApplyConfig(ctx context.Context,
 
 	obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(dep)
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 	patch := &unstructured.Unstructured{
 		Object: obj,
 	}
 
 	var current appsv1.Deployment
-	err = r.Get(ctx, client.ObjectKey{Namespace: "default", Name: "sample3"}, &current)
-	if err != nil && !apierrors.IsNotFound(err) {
-		return ctrl.Result{}, err
+	err = r.Get(ctx, client.ObjectKey{Namespace: mdView.Namespace, Name: depName}, &current)
+	if err != nil && !errors.IsNotFound(err) {
+		return err
 	}
 
-	currApplyConfig, err := applyappsv1.ExtractDeployment(&current, "client-sample")
+	currApplyConfig, err := appsv1apply.ExtractDeployment(&current, "markdown-view-controller")
+	if err != nil {
+		return err
+	}
+
+	if equality.Semantic.DeepEqual(dep, currApplyConfig) {
+		return nil
+	}
+
+	err = r.Patch(ctx, patch, client.Apply, &client.PatchOptions{
+		FieldManager: "markdown-view-controller",
+		Force:        pointer.Bool(true),
+	})
+
+	if err != nil {
+		logger.Error(err, "unable to create or update Deployment")
+		return err
+	}
+	logger.Info("reconcile Deployment successfully", "name", mdView.Name)
+	return nil
+}
+
+//! [reconcile-deployment]
+
+//! [reconcile-service]
+
+func (r *MarkdownViewReconciler) reconcileService(ctx context.Context, mdView viewv1.MarkdownView) error {
+	logger := log.FromContext(ctx)
+	svcName := "viewer-" + mdView.Name
+
+	svc := corev1apply.Service(svcName, mdView.Namespace).
+		WithLabels(map[string]string{
+			"app.kubernetes.io/name":       "mdbook",
+			"app.kubernetes.io/instance":   mdView.Name,
+			"app.kubernetes.io/created-by": "markdown-view-controller",
+		}).
+		WithSpec(corev1apply.ServiceSpec().
+			WithSelector(map[string]string{
+				"app.kubernetes.io/name":       "mdbook",
+				"app.kubernetes.io/instance":   mdView.Name,
+				"app.kubernetes.io/created-by": "markdown-view-controller",
+			}).
+			WithType(corev1.ServiceTypeClusterIP).
+			WithPorts(corev1apply.ServicePort().
+				WithProtocol(corev1.ProtocolTCP).
+				WithPort(80).
+				WithTargetPort(intstr.FromInt(3000)),
+			),
+		)
+
+	obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(svc)
+	if err != nil {
+		return err
+	}
+	patch := &unstructured.Unstructured{
+		Object: obj,
+	}
+
+	var current corev1.Service
+	err = r.Get(ctx, client.ObjectKey{Namespace: mdView.Namespace, Name: svcName}, &current)
+	if err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+
+	currApplyConfig, err := corev1apply.ExtractService(&current, "markdown-view-controller")
+	if err != nil {
+		return err
+	}
+
+	if equality.Semantic.DeepEqual(svc, currApplyConfig) {
+		return nil
+	}
+
+	err = r.Patch(ctx, patch, client.Apply, &client.PatchOptions{
+		FieldManager: "markdown-view-controller",
+		Force:        pointer.Bool(true),
+	})
+	if err != nil {
+		logger.Error(err, "unable to create or update Service")
+		return err
+	}
+
+	logger.Info("reconcile Service successfully", "name", mdView.Name)
+	return nil
+}
+
+//! [reconcile-service]
+
+//! [update-status]
+
+func (r *MarkdownViewReconciler) updateStatus(ctx context.Context, mdView viewv1.MarkdownView) (ctrl.Result, error) {
+	var dep appsv1.Deployment
+	err := r.Get(ctx, client.ObjectKey{Namespace: mdView.Namespace, Name: "viewer-" + mdView.Name}, &dep)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	if equality.Semantic.DeepEqual(dep, currApplyConfig) {
-		return ctrl.Result{}, nil
+	var status viewv1.MarkdownViewStatus
+	if dep.Status.AvailableReplicas == 0 {
+		status = viewv1.MarkdownViewNotReady
+	} else if dep.Status.AvailableReplicas == mdView.Spec.Replicas {
+		status = viewv1.MarkdownViewHealthy
+	} else {
+		status = viewv1.MarkdownViewAvailable
 	}
 
-	err = r.Patch(ctx, patch, client.Apply, &client.PatchOptions{
-		FieldManager: "client-sample",
-		Force:        pointer.Bool(true),
-	})
-	return ctrl.Result{}, err
+	if mdView.Status != status {
+		mdView.Status = status
+		err = r.Status().Update(ctx, &mdView)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	if mdView.Status != viewv1.MarkdownViewHealthy {
+		return ctrl.Result{Requeue: true}, nil
+	}
+	return ctrl.Result{}, nil
 }
 
-//! [patch-apply-config]
+//! [update-status]
+
+//! [managedby]
+
+// SetupWithManager sets up the controller with the Manager.
+func (r *MarkdownViewReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&viewv1.MarkdownView{}).
+		Owns(&corev1.ConfigMap{}).
+		Owns(&appsv1.Deployment{}).
+		Owns(&corev1.Service{}).
+		Complete(r)
+}
+
+//! [managedby]
