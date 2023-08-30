@@ -64,6 +64,18 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test ./... -coverprofile cover.out
 
+#! [kind]
+.PHONY: start
+start: ## Start local Kubernetes cluster
+	ctlptl apply -f ./cluster.yaml
+	kubectl apply --validate=false -f https://github.com/jetstack/cert-manager/releases/latest/download/cert-manager.yaml
+	kubectl -n cert-manager wait --for=condition=available --timeout=180s --all deployments
+
+.PHONY: stop
+stop: ## Stop local Kubernetes cluster
+	ctlptl delete -f ./cluster.yaml
+#! [kind]
+
 ##@ Build
 
 .PHONY: build
